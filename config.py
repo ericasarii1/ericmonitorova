@@ -1,155 +1,160 @@
-import logging
-from telegram import Update, MessageEntity, ChatMemberUpdated, ChatPermissions, ChatAction, constants
-from telegram.ext import (
-    ApplicationBuilder, CommandHandler,
-    MessageHandler, filters, ContextTypes,
-    ChatMemberHandler
+import logging, datetime, asyncio
+from telegram import (
+    Update, ChatPermissions, InlineKeyboardButton, InlineKeyboardMarkup
 )
-from datetime import datetime
-from collections import defaultdict
+from telegram.ext import (
+    ApplicationBuilder, ContextTypes, MessageHandler,
+    ChatMemberHandler, filters, CallbackContext, CommandHandler
+)
 
-# === KONFIGURASI BOT ===
-BOT_TOKEN = "ISI_TOKEN_BOT_KAMU"
-GROUP_UTAMA_ID = -1001234567890  # ID grup publik
-GROUP_ADMIN_ID = -1009876543210  # ID grup admin privat
-TOPIK_LOG_ID = 123  # ID topik untuk log
+# ================== KONFIGURASI ===================
+BOT_TOKEN = "ISI_TOKEN_BOT_MU"
+ID_GRUP_UTAMA = -1001234567890   # Ganti dengan grup publik
+ID_GRUP_ADMIN = -1009876543210   # Ganti dengan grup admin
+TOPIK_LOG = 1234                 # ID topik/thread untuk laporan log
+TOPIK_STAT = 5678                # ID topik/thread untuk statistik
+# ==================================================
 
-# === LOGGING AKTIF ===
 logging.basicConfig(level=logging.INFO)
 
-# === VARIABEL UNTUK STATISTIK ===
-statistik = defaultdict(int)
+# ======== LOGIK PEMBENTUK MENTION & LINK =========
+def mention(user):
+    if user.username:
+        return f"@{user.username}"
+    return f"<a href='tg://user?id={user.id}'>{user.first_name}</a>"
 
-# === FORMAT WAKTU ===
-def waktu_id():
-    return datetime.now().strftime("%d/%m/%Y %H:%M:%S")
+def msg_link(chat_id, msg_id):
+    return f"https://t.me/c/{str(chat_id)[4:]}/{msg_id}"
 
-# === KIRIM LOG KE TOPIK GRUP ADMIN ===
-async def kirim_log(context: ContextTypes.DEFAULT_TYPE, isi: str, link: str = None):
-    try:
-        text = f"📌 <b>LOG GRUP</b>\n🕒 {waktu_id()}\n{isi}"
-        if link:
-            text += f"\n🔗 <a href='{link}'>Lihat Pesan</a>"
+# ========== HANDLER PERUBAHAN STATUS MEMBER ==========
+async def status_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    member = update.chat_member
+    old = member.old_chat_member
+    new = member.new_chat_member
+
+    if update.chat.id != ID_GRUP_UTAMA:
+        return
+
+    user = new.user
+    actor = member.from_user
+    teks = ""
+    action = None
+
+    if old.status in ['left', 'kicked'] and new.status == 'member':
+        teks = f"👋 {mention(user)} bergabung ke grup."
+    elif new.status == 'left':
+        teks = f"👋 {mention(user)} keluar dari grup."
+    elif new.status == 'kicked':
+        teks = f"🔨 {mention(user)} di-*ban* oleh {mention(actor)}."
+    elif new.status == 'restricted' and new.can_send_messages is False:
+        teks = f"🔇 {mention(user)} di-*mute* oleh {mention(actor)}."
+    elif old.status == 'restricted' and old.can_send_messages is False and new.can_send_messages:
+        teks = f"🔊 {mention(user)} di-*unmute* oleh {mention(actor)}."
+    elif old.status == 'kicked' and new.status == 'member':
+        teks = f"🔓 {mention(user)} di-*unban* oleh {mention(actor)}."
+    elif old.status == 'kicked' and new.status == 'restricted':
+        teks = f"⚠️ {mention(user)} di-*unkick* oleh {mention(actor)}."
+
+    if teks:
         await context.bot.send_message(
-            chat_id=GROUP_ADMIN_ID,
-            message_thread_id=TOPIK_LOG_ID,
-            text=text,
-            parse_mode=constants.ParseMode.HTML,
-            disable_web_page_preview=True,
+            chat_id=ID_GRUP_ADMIN,
+            message_thread_id=TOPIK_LOG,
+            text=teks,
+            parse_mode='HTML',
+            disable_web_page_preview=True
         )
-    except Exception as e:
-        logging.warning(f"Gagal kirim log: {e}")
 
-# === DETEKSI JOIN/LEFT/KICK/ETC ===
-async def monitor_member(update: Update, context: ContextTypes.DEFAULT_TYPE):
+# ========== PEMANTAU PESAN ==========
+async def pesan_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = update.message
-    if not msg or msg.chat.id != GROUP_UTAMA_ID:
+    if not msg or msg.chat.id != ID_GRUP_UTAMA:
         return
 
-    link = msg.link if hasattr(msg, "link") else f"https://t.me/c/{str(GROUP_UTAMA_ID)[4:]}/{msg.message_id}"
-
-    if msg.new_chat_members:
-        for member in msg.new_chat_members:
-            await kirim_log(context, f"➕ <b>{member.mention_html()}</b> bergabung ke grup.", link)
-            statistik["join"] += 1
-
-    elif msg.left_chat_member:
-        await kirim_log(context, f"➖ <b>{msg.left_chat_member.mention_html()}</b> keluar dari grup.", link)
-        statistik["leave"] += 1
-
-# === DETEKSI TIPE PESAN UNTUK STATISTIK ===
-async def handle_pesan(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    msg = update.message
-    if not msg or msg.chat.id != GROUP_UTAMA_ID:
-        return
-
-    link = f"https://t.me/c/{str(GROUP_UTAMA_ID)[4:]}/{msg.message_id}"
-
-    if msg.text and any(e.type == MessageEntity.URL for e in msg.entities or []):
-        await kirim_log(context, f"🔗 <b>{msg.from_user.mention_html()}</b> mengirim tautan.", link)
-        statistik["link"] += 1
-
-    elif msg.photo:
-        await kirim_log(context, f"🖼️ <b>{msg.from_user.mention_html()}</b> mengirim foto.", link)
-        statistik["foto"] += 1
-
-    elif msg.video:
-        await kirim_log(context, f"🎞️ <b>{msg.from_user.mention_html()}</b> mengirim video.", link)
-        statistik["video"] += 1
-
-    elif msg.sticker:
-        await kirim_log(context, f"🎭 <b>{msg.from_user.mention_html()}</b> mengirim stiker.", link)
-        statistik["stiker"] += 1
-
-    elif msg.voice or msg.audio:
-        await kirim_log(context, f"🎵 <b>{msg.from_user.mention_html()}</b> mengirim audio.", link)
-        statistik["audio"] += 1
-
-    elif msg.animation:
-        await kirim_log(context, f"🌀 <b>{msg.from_user.mention_html()}</b> mengirim GIF/animasi.", link)
-        statistik["animasi"] += 1
-
-    statistik["pesan"] += 1
-
-# === DETEKSI PERUBAHAN STATUS (KICK, BAN, MUTE, ETC) ===
-async def handle_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    status: ChatMemberUpdated = update.chat_member
-    user = status.new_chat_member.user
-    admin = status.from_user
-    link = f"https://t.me/c/{str(GROUP_UTAMA_ID)[4:]}/{status.message.message_id}" if hasattr(status, "message") else ""
-
-    lama = status.old_chat_member.status
-    baru = status.new_chat_member.status
-
-    tindakan = ""
-    if lama in ["member", "restricted"] and baru == "kicked":
-        tindakan = f"🚫 <b>{user.mention_html()}</b> di-<b>kick</b> oleh {admin.mention_html()}."
-        statistik["kick"] += 1
-    elif lama != "banned" and baru == "banned":
-        tindakan = f"🔨 <b>{user.mention_html()}</b> di-<b>ban</b> oleh {admin.mention_html()}."
-        statistik["ban"] += 1
-    elif lama == "banned" and baru in ["member", "restricted"]:
-        tindakan = f"♻️ <b>{user.mention_html()}</b> di-<b>unban</b> oleh {admin.mention_html()}."
-        statistik["unban"] += 1
-    elif lama == "restricted" and baru == "member":
-        tindakan = f"🔈 <b>{user.mention_html()}</b> di-<b>unmute</b> oleh {admin.mention_html()}."
-        statistik["unmute"] += 1
-    elif lama == "member" and baru == "restricted":
-        tindakan = f"🔇 <b>{user.mention_html()}</b> di-<b>mute</b> oleh {admin.mention_html()}."
-        statistik["mute"] += 1
-
-    if tindakan:
-        await kirim_log(context, tindakan, link)
-
-# === OBROLAN VIDEO ===
-async def handle_videochat(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    msg = update.message
-    if not msg or msg.chat.id != GROUP_UTAMA_ID:
-        return
-
-    link = f"https://t.me/c/{str(GROUP_UTAMA_ID)[4:]}/{msg.message_id}"
+    user = msg.from_user
+    teks = ""
+    kategori = None
 
     if msg.video_chat_started:
-        await kirim_log(context, "🎥 <b>Obrolan video</b> dimulai!", link)
+        teks = f"📢 {mention(user)} memulai obrolan video."
+    elif msg.video_chat_ended:
+        teks = f"📴 Obrolan video berakhir."
+    elif msg.sticker:
+        kategori = "stiker"
+    elif msg.photo:
+        kategori = "gambar"
+    elif msg.video:
+        kategori = "video"
+    elif msg.audio or msg.voice:
+        kategori = "audio"
 
-    if msg.video_chat_ended:
-        await kirim_log(context, "📴 <b>Obrolan video</b> telah selesai.", link)
+    if teks:
+        await context.bot.send_message(
+            chat_id=ID_GRUP_ADMIN,
+            message_thread_id=TOPIK_LOG,
+            text=teks + f"\n<a href='{msg_link(msg.chat.id, msg.message_id)}'>🔗 Ke pesan</a>",
+            parse_mode='HTML',
+            disable_web_page_preview=True
+        )
+    elif kategori:
+        await context.bot.send_message(
+            chat_id=ID_GRUP_ADMIN,
+            message_thread_id=TOPIK_LOG,
+            text=f"📦 {mention(user)} mengirim {kategori}\n<a href='{msg_link(msg.chat.id, msg.message_id)}'>🔗 Ke pesan</a>",
+            parse_mode='HTML',
+            disable_web_page_preview=True
+        )
 
-# === PERINTAH /statistik ===
-async def statistik_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.effective_chat.id != GROUP_ADMIN_ID:
+# ========== PERINTAH RESET STAT ==========
+stats = {
+    "pesan": 0, "stiker": 0, "gambar": 0,
+    "video": 0, "audio": 0
+}
+
+async def stat_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    msg = update.message
+    if not msg or msg.chat.id != ID_GRUP_UTAMA:
         return
-    teks = "\n".join([f"• {k}: {v}" for k, v in statistik.items()])
-    await update.message.reply_text(f"📊 Statistik Grup:\n{teks}")
 
-# === JALANKAN BOT ===
-if __name__ == "__main__":
+    stats["pesan"] += 1
+    if msg.sticker: stats["stiker"] += 1
+    if msg.photo: stats["gambar"] += 1
+    if msg.video: stats["video"] += 1
+    if msg.audio or msg.voice: stats["audio"] += 1
+
+async def reset_stat(context: CallbackContext):
+    teks = (
+        f"📊 Statistik Harian Grup:\n"
+        f"🗨️ Pesan: {stats['pesan']}\n"
+        f"🎭 Stiker: {stats['stiker']}\n"
+        f"🖼️ Gambar: {stats['gambar']}\n"
+        f"🎞️ Video: {stats['video']}\n"
+        f"🎵 Audio: {stats['audio']}"
+    )
+    await context.bot.send_message(
+        chat_id=ID_GRUP_ADMIN,
+        message_thread_id=TOPIK_STAT,
+        text=teks
+    )
+    for k in stats: stats[k] = 0
+
+async def cmd_reset(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_chat.id == ID_GRUP_ADMIN:
+        await reset_stat(context)
+        await update.message.reply_text("Statistik berhasil direset.")
+
+# ========== INISIALISASI ==========
+async def main():
     app = ApplicationBuilder().token(BOT_TOKEN).build()
 
-    app.add_handler(MessageHandler(filters.StatusUpdate.NEW_CHAT_MEMBERS | filters.StatusUpdate.LEFT_CHAT_MEMBER, monitor_member))
-    app.add_handler(MessageHandler(filters.ALL & filters.Chat(GROUP_UTAMA_ID), handle_pesan))
-    app.add_handler(ChatMemberHandler(handle_status, ChatMemberHandler.CHAT_MEMBER))
-    app.add_handler(MessageHandler(filters.VideoChatStarted() | filters.VideoChatEnded(), handle_videochat))
-    app.add_handler(CommandHandler("statistik", statistik_cmd))
+    app.add_handler(ChatMemberHandler(status_handler, ChatMemberHandler.CHAT_MEMBER))
+    app.add_handler(MessageHandler(filters.ALL, pesan_handler))
+    app.add_handler(MessageHandler(filters.ALL, stat_handler))
+    app.add_handler(CommandHandler("resetstat", cmd_reset))
 
-    app.run_polling()
+    job = app.job_queue
+    job.run_daily(reset_stat, time=datetime.time(hour=17, minute=0))  # WIB jam 00:00 (UTC+7)
+
+    await app.run_polling()
+
+if __name__ == "__main__":
+    asyncio.run(main())
